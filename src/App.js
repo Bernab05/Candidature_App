@@ -30,11 +30,43 @@ const createColoredIcon = (color) => {
 // Composant pour centrer la carte sur un marqueur
 const MapController = ({ center, zoom }) => {
   const map = useMap();
+
   useEffect(() => {
-    if (center) {
-      map.flyTo(center, zoom || 14, { duration: 0.5 });
+    if (center && Array.isArray(center) && center.length === 2) {
+      const [lat, lng] = center;
+      if (!isNaN(lat) && !isNaN(lng)) {
+        map.flyTo([parseFloat(lat), parseFloat(lng)], zoom || 14, {
+          duration: 0.5,
+          animate: true
+        });
+
+        // Forcer le rafraîchissement de la carte après le déplacement
+        setTimeout(() => {
+          map.invalidateSize();
+        }, 600);
+      }
     }
   }, [center, zoom, map]);
+
+  // Forcer le refresh lors des événements de zoom
+  useEffect(() => {
+    const handleZoomEnd = () => {
+      map.invalidateSize();
+    };
+
+    const handleMoveEnd = () => {
+      map.invalidateSize();
+    };
+
+    map.on('zoomend', handleZoomEnd);
+    map.on('moveend', handleMoveEnd);
+
+    return () => {
+      map.off('zoomend', handleZoomEnd);
+      map.off('moveend', handleMoveEnd);
+    };
+  }, [map]);
+
   return null;
 };
 
@@ -53,9 +85,11 @@ const SuiviCandidatures = () => {
   const [storageAvailable, setStorageAvailable] = useState(true);
   const [activeMarker, setActiveMarker] = useState(null);
   const [mapCenter, setMapCenter] = useState(null);
+  const [isGeocoding, setIsGeocoding] = useState(false);
 
   const dataRef = useRef([]);
   const markerRefs = useRef({});
+  const fileInputRef = useRef(null);
 
   // Storage wrapper
   const storage = {
@@ -77,6 +111,7 @@ const SuiviCandidatures = () => {
     visite: "",
     reponse: "",
     commentaires: "",
+    adresse: "",
     lat: "",
     lng: "",
   });
@@ -165,15 +200,98 @@ const SuiviCandidatures = () => {
     return () => document.removeEventListener("keydown", handleEscape);
   }, [showModal, showDeleteModal, isSaving]);
 
+  // Nettoyer les références obsolètes des marqueurs
+  useEffect(() => {
+    const validIndices = new Set(candidatures.map((_, idx) => idx));
+    Object.keys(markerRefs.current).forEach((key) => {
+      if (!validIndices.has(Number(key))) {
+        delete markerRefs.current[key];
+      }
+    });
+  }, [candidatures]);
+
+  // Mettre à jour la position sur la carte quand les coordonnées changent dans le formulaire
+  useEffect(() => {
+    if (showModal && editingIndex !== null && formData.lat && formData.lng) {
+      const lat = parseFloat(formData.lat);
+      const lng = parseFloat(formData.lng);
+      if (!isNaN(lat) && !isNaN(lng)) {
+        setMapCenter([lat, lng]);
+        setActiveMarker(editingIndex);
+      }
+    }
+  }, [formData.lat, formData.lng, showModal, editingIndex]);
+
+  // Fonction de géocodage avec l'API Nominatim (OpenStreetMap)
+  // Supporte les formats:
+  // - Adresse complète: "17 rue Marbeuf, Paris 8e, France"
+  // - Ville + Pays: "Tokyo, Japan"
+  // - Restaurant + Ville: "Noma, Copenhagen, Denmark"
+  const geocodeAddress = async (address) => {
+    if (!address || address.trim() === "") return null;
+
+    setIsGeocoding(true);
+    try {
+      // Ne modifier l'adresse que si c'est clairement incomplet
+      // (pas de virgule = probablement juste un nom de rue sans ville)
+      let searchAddress = address;
+
+      // Si pas de virgule et pas de mot-clé de pays/ville, on suppose que c'est Paris
+      const hasComma = address.includes(',');
+      const looksLikeInternational = /\b(france|paris|london|tokyo|new york|berlin|madrid|rome|barcelona|milan|lyon|marseille|copenhagen|stockholm|oslo|amsterdam|brussels|vienna|prague|budapest|warsaw|lisbon|dublin|athens|helsinki|zurich|geneva|monaco|luxembourg|japan|china|korea|singapore|thailand|india|australia|canada|usa|uk|spain|italy|germany|denmark|sweden|norway|netherlands|belgium|austria|czech|hungary|poland|portugal|ireland|greece|finland|switzerland)\b/i.test(address);
+
+      if (!hasComma && !looksLikeInternational) {
+        // Pas de contexte géographique détecté, on ajoute Paris par défaut
+        searchAddress = `${address}, Paris, France`;
+      }
+
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchAddress)}&limit=1&addressdetails=1`,
+        {
+          headers: {
+            'User-Agent': 'SuiviCandidaturesRestaurants/1.0'
+          }
+        }
+      );
+
+      if (!response.ok) throw new Error("Erreur de géocodage");
+
+      const data = await response.json();
+
+      if (data && data.length > 0) {
+        return {
+          lat: parseFloat(data[0].lat),
+          lng: parseFloat(data[0].lon),
+          display_name: data[0].display_name, // Nom complet trouvé
+        };
+      } else {
+        return null;
+      }
+    } catch (error) {
+      console.error("Erreur de géocodage:", error);
+      return null;
+    } finally {
+      setIsGeocoding(false);
+    }
+  };
+
   // Gérer le clic sur la liste pour centrer la carte
   const handleListClick = (idx) => {
     const resto = candidatures[idx];
     if (resto && resto.lat && resto.lng) {
-      setActiveMarker(idx);
-      setMapCenter([resto.lat, resto.lng]);
-      // Ouvrir le popup du marqueur
-      if (markerRefs.current[idx]) {
-        markerRefs.current[idx].openPopup();
+      const lat = parseFloat(resto.lat);
+      const lng = parseFloat(resto.lng);
+
+      if (!isNaN(lat) && !isNaN(lng)) {
+        setActiveMarker(idx);
+        setMapCenter([lat, lng]);
+
+        // Ouvrir le popup du marqueur après un court délai
+        setTimeout(() => {
+          if (markerRefs.current[idx]) {
+            markerRefs.current[idx].openPopup();
+          }
+        }, 600);
       }
     }
   };
@@ -200,8 +318,9 @@ const SuiviCandidatures = () => {
         visite: "",
         reponse: "",
         commentaires: "",
-        lat: "48.8566",
-        lng: "2.3522",
+        adresse: "",
+        lat: "",
+        lng: "",
       });
     }
     setShowModal(true);
@@ -211,7 +330,37 @@ const SuiviCandidatures = () => {
     setShowModal(false);
     setEditingIndex(null);
     setIsSaving(false);
-    setFormData({ restaurant: "", dateEnvoi: "", telephone: "", chef: "", visite: "", reponse: "", commentaires: "", lat: "", lng: "" });
+    setFormData({ restaurant: "", dateEnvoi: "", telephone: "", chef: "", visite: "", reponse: "", commentaires: "", adresse: "", lat: "", lng: "" });
+  };
+
+  // Fonction pour géocoder manuellement l'adresse
+  const handleGeocodeManually = async () => {
+    if (!formData.adresse || formData.adresse.trim() === "") {
+      setSaveStatus("❌ Veuillez saisir une adresse");
+      setTimeout(() => setSaveStatus(""), 3000);
+      return;
+    }
+
+    setIsGeocoding(true);
+    setSaveStatus("🌍 Recherche de l'adresse...");
+
+    const coords = await geocodeAddress(formData.adresse);
+
+    if (coords) {
+      setFormData({
+        ...formData,
+        lat: coords.lat,
+        lng: coords.lng,
+      });
+
+      // Afficher un message avec le lieu trouvé
+      const locationName = coords.display_name ? coords.display_name.split(',').slice(0, 3).join(',') : '';
+      setSaveStatus(`✅ Trouvé: ${locationName}`);
+      setTimeout(() => setSaveStatus(""), 5000);
+    } else {
+      setSaveStatus("❌ Adresse non trouvée. Vérifiez l'orthographe ou essayez 'Ville, Pays'.");
+      setTimeout(() => setSaveStatus(""), 4000);
+    }
   };
 
   const handleSave = async () => {
@@ -231,10 +380,35 @@ const SuiviCandidatures = () => {
     setSaveStatus("💾 Sauvegarde...");
 
     try {
+      let lat = parseFloat(formData.lat) || null;
+      let lng = parseFloat(formData.lng) || null;
+
+      // Géocoder l'adresse si elle est fournie et que les coordonnées sont manquantes
+      if (formData.adresse && formData.adresse.trim() !== "" && (!lat || !lng)) {
+        setSaveStatus("🌍 Recherche de l'adresse...");
+        const coords = await geocodeAddress(formData.adresse);
+        if (coords) {
+          lat = coords.lat;
+          lng = coords.lng;
+          setSaveStatus("✅ Adresse trouvée !");
+        } else {
+          setSaveStatus("⚠️ Adresse non trouvée, coordonnées par défaut");
+          lat = 48.8566;
+          lng = 2.3522;
+        }
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+
+      // Valeurs par défaut si toujours pas de coordonnées
+      if (!lat || !lng) {
+        lat = 48.8566;
+        lng = 2.3522;
+      }
+
       const dataToSave = {
         ...formData,
-        lat: parseFloat(formData.lat) || 48.8566,
-        lng: parseFloat(formData.lng) || 2.3522,
+        lat,
+        lng,
       };
 
       let updatedCandidatures;
@@ -338,7 +512,7 @@ const SuiviCandidatures = () => {
         return;
       }
 
-      const headers = ["Restaurant", "Date Envoi", "Téléphone", "Chef", "Visite", "Réponse", "Commentaires", "Latitude", "Longitude"];
+      const headers = ["Restaurant", "Date Envoi", "Téléphone", "Chef", "Visite", "Réponse", "Commentaires", "Adresse", "Latitude", "Longitude"];
       const csvRows = [headers.join(",")];
 
       candidatures.forEach((c) => {
@@ -350,6 +524,7 @@ const SuiviCandidatures = () => {
           c.visite || "",
           c.reponse || "",
           `"${(c.commentaires || "").replace(/"/g, '""')}"`,
+          `"${(c.adresse || "").replace(/"/g, '""')}"`,
           c.lat || "",
           c.lng || "",
         ];
@@ -375,6 +550,68 @@ const SuiviCandidatures = () => {
       setSaveStatus("❌ Erreur export");
       setTimeout(() => setSaveStatus(""), 3000);
     }
+  };
+
+  const importCSV = (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        setSaveStatus("📥 Import en cours...");
+        const text = e.target.result;
+        const lines = text.split("\n").filter(line => line.trim());
+
+        if (lines.length < 2) {
+          setSaveStatus("❌ Fichier CSV vide");
+          setTimeout(() => setSaveStatus(""), 3000);
+          return;
+        }
+
+        // eslint-disable-next-line no-unused-vars
+        const headers = lines[0].split(",").map(h => h.trim().replace(/"/g, ''));
+        const importedData = [];
+
+        for (let i = 1; i < lines.length; i++) {
+          const values = lines[i].match(/(".*?"|[^,]+)(?=\s*,|\s*$)/g) || [];
+          const cleanValues = values.map(v => v.trim().replace(/^"|"$/g, '').replace(/""/g, '"'));
+
+          const entry = {
+            restaurant: cleanValues[0] || "",
+            dateEnvoi: cleanValues[1] || "",
+            telephone: cleanValues[2] || "",
+            chef: cleanValues[3] || "",
+            visite: cleanValues[4] || "",
+            reponse: cleanValues[5] || "",
+            commentaires: cleanValues[6] || "",
+            adresse: cleanValues[7] || "",
+            lat: cleanValues[8] ? parseFloat(cleanValues[8]) : "",
+            lng: cleanValues[9] ? parseFloat(cleanValues[9]) : "",
+          };
+
+          importedData.push(entry);
+        }
+
+        setCandidatures(importedData);
+        setFilteredCandidatures(importedData);
+        dataRef.current = importedData;
+
+        if (storageAvailable && checkStorageAvailable()) {
+          await storage.set("candidatures_restaurants_v3", JSON.stringify(importedData));
+        }
+
+        setSaveStatus(`✅ ${importedData.length} candidatures importées`);
+        setTimeout(() => setSaveStatus(""), 3000);
+      } catch (error) {
+        console.error("Erreur import:", error);
+        setSaveStatus("❌ Erreur import CSV");
+        setTimeout(() => setSaveStatus(""), 3000);
+      }
+    };
+
+    reader.readAsText(file);
+    event.target.value = "";
   };
 
   const formatDate = (dateString) => {
@@ -858,25 +1095,43 @@ const SuiviCandidatures = () => {
                 zoom={12}
                 style={{ height: "100%", width: "100%" }}
                 scrollWheelZoom={true}
+                zoomControl={true}
+                doubleClickZoom={true}
+                whenReady={(map) => {
+                  // Forcer le redimensionnement initial
+                  setTimeout(() => {
+                    map.target.invalidateSize();
+                  }, 100);
+                }}
               >
                 <TileLayer
                   attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
                   url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                 />
-                
-                {mapCenter && <MapController center={mapCenter} zoom={15} />}
+
+                <MapController center={mapCenter} zoom={15} />
 
                 {candidatures.map((resto, idx) => {
                   if (!resto.lat || !resto.lng) return null;
+                  const lat = parseFloat(resto.lat);
+                  const lng = parseFloat(resto.lng);
+
+                  if (isNaN(lat) || isNaN(lng)) return null;
+
                   const color = getMarkerColor(resto);
+                  const uniqueKey = `${resto.restaurant}-${resto.telephone}-${idx}`;
 
                   return (
                     <Marker
-                      key={`marker-${idx}`}
-                      position={[resto.lat, resto.lng]}
+                      key={uniqueKey}
+                      position={[lat, lng]}
                       icon={createColoredIcon(color)}
                       ref={(ref) => {
-                        if (ref) markerRefs.current[idx] = ref;
+                        if (ref) {
+                          markerRefs.current[idx] = ref;
+                        } else {
+                          delete markerRefs.current[idx];
+                        }
                       }}
                       eventHandlers={{
                         click: () => setActiveMarker(idx),
@@ -933,6 +1188,14 @@ const SuiviCandidatures = () => {
           <div className="controls">
             <button className="btn btn-primary" onClick={() => openModal()} type="button">➕ Nouvelle</button>
             <button className="btn btn-secondary" onClick={exportCSV} type="button">📥 Export CSV</button>
+            <button className="btn btn-secondary" onClick={() => fileInputRef.current?.click()} type="button">📤 Import CSV</button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv"
+              style={{ display: 'none' }}
+              onChange={importCSV}
+            />
             <input
               type="text"
               className="search-box"
@@ -1037,17 +1300,34 @@ const SuiviCandidatures = () => {
                   </select>
                 </div>
               </div>
-              <div className="form-row">
-                <div className="form-group">
-                  <label>Latitude</label>
-                  <input type="text" value={formData.lat || ""} onChange={(e) => setFormData({ ...formData, lat: e.target.value })} placeholder="48.8566" />
-                  <p className="coords-hint">Cherchez sur Google Maps</p>
+              <div className="form-group">
+                <label>Adresse</label>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <input
+                    type="text"
+                    value={formData.adresse || ""}
+                    onChange={(e) => setFormData({ ...formData, adresse: e.target.value })}
+                    placeholder="Ex: Tokyo, Japan | Noma, Copenhagen | 17 rue Marbeuf, Paris"
+                    disabled={isGeocoding}
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={handleGeocodeManually}
+                    disabled={isGeocoding || !formData.adresse}
+                    style={{ minWidth: '140px' }}
+                  >
+                    {isGeocoding ? "⏳ Recherche..." : "🔍 Rechercher"}
+                  </button>
                 </div>
-                <div className="form-group">
-                  <label>Longitude</label>
-                  <input type="text" value={formData.lng || ""} onChange={(e) => setFormData({ ...formData, lng: e.target.value })} placeholder="2.3522" />
-                  <p className="coords-hint">Clic droit → Coordonnées</p>
-                </div>
+                <p className="coords-hint">
+                  {isGeocoding
+                    ? "🌍 Recherche de l'adresse en cours..."
+                    : formData.lat && formData.lng
+                    ? `✅ Coordonnées: ${parseFloat(formData.lat).toFixed(4)}, ${parseFloat(formData.lng).toFixed(4)}`
+                    : "Ville + Pays ou adresse complète (international supporté)"}
+                </p>
               </div>
               <div className="form-group">
                 <label>Commentaires</label>
